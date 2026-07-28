@@ -1,0 +1,48 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend-runtime
+    restart: unless-stopped
+    environment:
+      Z_LAB_DATA_ROOT: /data
+      DRIVE_STORAGE_BACKEND: ${DRIVE_STORAGE_BACKEND:-local}
+      DRIVE_MODAL_VOLUME_NAME: ${DRIVE_MODAL_VOLUME_NAME:-modal-drive-storage}
+      DRIVE_MODAL_APP_NAME: ${DRIVE_MODAL_APP_NAME:-modal-drive}
+      DRIVE_MODAL_ENVIRONMENT: ${DRIVE_MODAL_ENVIRONMENT:-}
+      DRIVE_API_TOKEN: ${DRIVE_API_TOKEN:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      MODAL_TOKEN_ID: ${MODAL_TOKEN_ID:-}
+      MODAL_TOKEN_SECRET: ${MODAL_TOKEN_SECRET:-}
+    volumes:
+      - z_lab_data:/data
+    ports:
+      - "${API_PORT:-8000}:8000"
+    networks:
+      - z_lab
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend-runtime
+      args:
+        API_INTERNAL_URL: http://api:8000
+    restart: unless-stopped
+    environment:
+      API_INTERNAL_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    networks:
+      - z_lab
+
+volumes:
+  z_lab_data:
+
+networks:
+  z_lab:
+    driver: bridge
