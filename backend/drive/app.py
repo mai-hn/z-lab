@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Callable
 
@@ -18,6 +19,22 @@ from backend.drive.routers import download, files, offline, search, stats, uploa
 from backend.drive.storage import create_storage
 
 logger = logging.getLogger(__name__)
+
+
+def find_frontend_dist(candidates: Iterable[Path]) -> Path | None:
+    """Return the first readable frontend directory.
+
+    The unified deployment serves Next.js from a separate container, but this
+    fallback keeps standalone API usage compatible with a pre-built static UI.
+    Unreadable legacy paths must never prevent the API from starting.
+    """
+    for candidate in candidates:
+        try:
+            if candidate.is_dir():
+                return candidate
+        except OSError as exc:
+            logger.debug("Skipping inaccessible frontend directory %s: %s", candidate, exc)
+    return None
 
 
 def create_app(
@@ -100,11 +117,8 @@ def create_app(
             ),
         }
 
-    candidates = [
-        Path(__file__).resolve().parent.parent / "frontend" / "dist",
-        Path("/root/frontend/dist"),
-    ]
-    frontend_dist = next((p for p in candidates if p.exists()), None)
+    candidates = [Path(__file__).resolve().parent.parent / "frontend" / "dist"]
+    frontend_dist = find_frontend_dist(candidates)
     if frontend_dist is not None:
         assets = frontend_dist / "assets"
         if assets.exists():

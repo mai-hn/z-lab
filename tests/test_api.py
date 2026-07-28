@@ -9,9 +9,21 @@ os.environ["DRIVE_STORAGE_BACKEND"] = "local"
 from fastapi.testclient import TestClient  # noqa: E402
 
 from backend.main import app  # noqa: E402
+from backend.drive.app import find_frontend_dist  # noqa: E402
 
 
 client = TestClient(app)
+
+
+def test_inaccessible_legacy_frontend_path_does_not_block_api() -> None:
+    class InaccessiblePath:
+        def is_dir(self) -> bool:
+            raise PermissionError("blocked by container user")
+
+        def __str__(self) -> str:
+            return "/root/frontend/dist"
+
+    assert find_frontend_dist([InaccessiblePath()]) is None  # type: ignore[list-item]
 
 
 def test_health_and_registry() -> None:
