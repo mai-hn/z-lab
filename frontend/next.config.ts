@@ -16,6 +16,14 @@ const nextConfig: NextConfig = {
         destination: `${apiOrigin}/translate`,
       },
       {
+        source: "/dav",
+        destination: `${apiOrigin}/dav`,
+      },
+      {
+        source: "/dav/:path*",
+        destination: `${apiOrigin}/dav/:path*`,
+      },
+      {
         source: "/v2/:path*",
         destination: `${apiOrigin}/v2/:path*`,
       },

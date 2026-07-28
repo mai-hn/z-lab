@@ -7,6 +7,7 @@ Browser
   │
   ├─ Next.js pages and server proxy :3000
   │      ├─ /api/drive/*  ───────────────┐
+  │      ├─ /dav/*                       │
   │      ├─ /api/router/*                │
   │      ├─ /api/models/*                ▼
   │      └─ /translate + /v2/*     FastAPI :8000
@@ -34,6 +35,12 @@ so a new project does not need to share domain tables with existing tools.
    also emit an ordered manifest for files larger than 8 MiB.
 5. Download streams manifest entries in order and supports HTTP Range. `Content-Length`,
    `X-File-Size` and `X-Chunk-Count` allow browsers and clients to show progress.
+6. WebDAV operates on the same metadata and content manifests. `MOVE` changes metadata,
+   `COPY` creates shared content references, and `DELETE` reaches Modal only when the
+   last reference is removed. Dead properties from `PROPPATCH` live in SQLite.
+7. The browser computes upload/download speed from locally observed byte deltas.
+   Offline-task speed is computed from consecutive 1.5-second metadata samples instead
+   of trusting a stale server-side rate.
 
 ## Adding another project
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from typing import Annotated, Callable, Generator, Union
 
 from fastapi import Depends, Header, HTTPException, Request
@@ -39,8 +41,19 @@ def require_token(
     provided = x_api_token
     if not provided and authorization and authorization.lower().startswith("bearer "):
         provided = authorization[7:].strip()
+    if not provided and authorization and authorization.lower().startswith("basic "):
+        try:
+            decoded = base64.b64decode(authorization[6:].strip()).decode("utf-8")
+            username, _, password = decoded.partition(":")
+            provided = password or username
+        except (binascii.Error, UnicodeDecodeError):
+            provided = None
     if provided != token:
-        raise HTTPException(status_code=401, detail="Invalid or missing API token")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API token",
+            headers={"WWW-Authenticate": 'Basic realm="Z-Lab WebDAV"'},
+        )
 
 
 DbSession = Annotated[Session, Depends(get_db)]

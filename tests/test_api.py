@@ -96,3 +96,93 @@ def test_chunked_upload_and_ordered_download() -> None:
 
     deleted = client.delete(f"/api/drive/files/{node['id']}")
     assert deleted.status_code == 204
+
+
+def test_webdav_full_file_lifecycle_and_custom_properties() -> None:
+    options = client.request("OPTIONS", "/dav")
+    assert options.status_code == 200
+    assert options.headers["dav"] == "1, 2"
+    assert {
+        "PROPFIND",
+        "PUT",
+        "MKCOL",
+        "MOVE",
+        "COPY",
+        "PROPPATCH",
+    }.issubset(set(options.headers["allow"].split(", ")))
+
+    created = client.request("MKCOL", "/dav/documents")
+    assert created.status_code == 201, created.text
+
+    content = b"WebDAV from Z-Lab"
+    uploaded = client.put(
+        "/dav/documents/hello.txt",
+        content=content,
+        headers={"Content-Type": "text/plain"},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+
+    head = client.head("/dav/documents/hello.txt")
+    assert head.status_code == 200
+    assert int(head.headers["content-length"]) == len(content)
+    assert head.headers["etag"]
+    assert head.headers["last-modified"]
+
+    downloaded = client.get("/dav/documents/hello.txt")
+    assert downloaded.status_code == 200
+    assert downloaded.content == content
+    assert downloaded.headers["x-file-size"] == str(len(content))
+
+    properties = client.request(
+        "PROPPATCH",
+        "/dav/documents/hello.txt",
+        content=(
+            '<?xml version="1.0"?>'
+            '<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:z-lab">'
+            "<D:set><D:prop><Z:favorite>yes</Z:favorite></D:prop></D:set>"
+            "</D:propertyupdate>"
+        ),
+        headers={"Content-Type": "application/xml"},
+    )
+    assert properties.status_code == 207, properties.text
+
+    listing = client.request("PROPFIND", "/dav/documents", headers={"Depth": "1"})
+    assert listing.status_code == 207
+    assert b"hello.txt" in listing.content
+    assert b"favorite" in listing.content
+    assert b"yes" in listing.content
+
+    copied = client.request(
+        "COPY",
+        "/dav/documents/hello.txt",
+        headers={"Destination": "/dav/documents/copy.txt"},
+    )
+    assert copied.status_code == 201, copied.text
+    assert client.get("/dav/documents/copy.txt").content == content
+
+    moved = client.request(
+        "MOVE",
+        "/dav/documents/hello.txt",
+        headers={"Destination": "/dav/moved.txt"},
+    )
+    assert moved.status_code == 201, moved.text
+    assert client.get("/dav/documents/hello.txt").status_code == 404
+    assert client.get("/dav/moved.txt").content == content
+
+    assert client.delete("/dav/documents/copy.txt").status_code == 204
+    assert client.delete("/dav/documents").status_code == 204
+    assert client.delete("/dav/moved.txt").status_code == 204
+
+
+def test_webdav_put_chunks_files_larger_than_eight_mib() -> None:
+    content = b"z" * (8 * 1024 * 1024 + 1)
+    uploaded = client.put("/dav/large-dav.bin", content=content)
+    assert uploaded.status_code == 201, uploaded.text
+
+    listing = client.get("/api/drive/files", params={"path": "/"})
+    assert listing.status_code == 200
+    node = next(item for item in listing.json()["items"] if item["name"] == "large-dav.bin")
+    assert node["size"] == len(content)
+    assert node["chunk_count"] == 2
+    assert client.get("/dav/large-dav.bin").content == content
+    assert client.delete("/dav/large-dav.bin").status_code == 204

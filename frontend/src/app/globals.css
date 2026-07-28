@@ -948,6 +948,98 @@ button {
   font: 800 10px/1 ui-monospace, monospace;
 }
 
+.transfer-panel {
+  margin-bottom: 18px;
+}
+
+.transfer-list {
+  display: grid;
+}
+
+.transfer-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  border-top: 1.5px solid var(--line);
+  padding: 14px 18px;
+}
+
+.transfer-direction {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 2px solid var(--line);
+  border-radius: 8px;
+}
+
+.transfer-direction.upload {
+  background: var(--yellow);
+}
+
+.transfer-direction.download {
+  color: white;
+  background: var(--ink);
+}
+
+.transfer-main {
+  min-width: 0;
+}
+
+.transfer-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 7px;
+  font-size: 12px;
+}
+
+.transfer-meta strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-meta span,
+.transfer-rate span {
+  color: var(--muted);
+  font: 750 10px/1.2 ui-monospace, monospace;
+  white-space: nowrap;
+}
+
+.transfer-track {
+  height: 9px;
+  overflow: hidden;
+  border: 1.5px solid var(--line);
+  border-radius: 99px;
+  background: #ddd9d1;
+}
+
+.transfer-track span {
+  display: block;
+  height: 100%;
+  background: var(--yellow);
+  transition: width 120ms linear;
+}
+
+.transfer-error {
+  display: block;
+  margin-top: 6px;
+  color: var(--red);
+}
+
+.transfer-rate {
+  min-width: 76px;
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+}
+
+.transfer-rate strong {
+  font: 900 15px/1 ui-monospace, monospace;
+}
+
 .row-name {
   display: flex;
   align-items: center;
@@ -1056,6 +1148,18 @@ button {
 .storage-note h2 {
   margin: 0 0 8px;
   font-size: 18px;
+}
+
+.storage-note code {
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 2px 5px;
+  font: 800 12px/1.2 ui-monospace, monospace;
+}
+
+.storage-note-secondary {
+  margin-top: -8px;
+  background: var(--surface);
 }
 
 .strategy-diagram {
@@ -1708,6 +1812,17 @@ button {
 
   .history-list summary {
     grid-template-columns: 1fr;
+  }
+
+  .transfer-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .transfer-rate {
+    grid-column: 2;
+    grid-template-columns: auto auto;
+    justify-content: space-between;
+    justify-items: start;
   }
 
   .chat-compose {

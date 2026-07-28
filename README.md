@@ -68,6 +68,24 @@ starts only for offline downloads.
 | `/api/drive/*` | Modal Drive API |
 | `/api/router/api/*` | DeepRouter management API |
 | `/api/models/*` | Model proxy API |
+| `/dav` | WebDAV root (available on both web and API ports) |
 | `/translate`, `/v2/translate`, `/v2/usage` | Original DeepRouter-compatible API |
+
+## WebDAV
+
+Connect a WebDAV client to `http(s)://host:port/dav`. Z-Lab supports `OPTIONS`,
+`PROPFIND`, `GET`, `HEAD`, `PUT`, `MKCOL`, `DELETE`, `MOVE`, `COPY` and
+`PROPPATCH`.
+
+If `DRIVE_API_TOKEN` is empty, WebDAV is open. If it is configured, use any
+username and put the token in the WebDAV password field. Bearer authentication
+and the `X-API-Token` header remain available for API clients.
+
+WebDAV `PUT` writes files larger than 8 MiB as ordered chunks without a
+persistent local file cache. `GET` reads those chunks in order and returns
+`Content-Length`, `X-File-Size`, `ETag` and `Last-Modified`.
+
+The translation router keeps its public compatibility endpoint at
+`http(s)://host:port/translate`.
 
 See [docs/architecture.md](docs/architecture.md) for boundaries and the extension model.

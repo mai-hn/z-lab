@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from backend.drive.models import FileNode, NodeType, StoredChunk, StoredObject, utcnow
+from backend.drive.models import (
+    DavProperty,
+    FileNode,
+    NodeType,
+    StoredChunk,
+    StoredObject,
+    utcnow,
+)
 from backend.drive.schemas import ConflictPolicy, FileNodeOut
 from backend.drive.utils import (
     guess_mime,
@@ -334,6 +341,7 @@ class FileService:
                 content_ids.add(node.content_id)
             elif node.storage_key:
                 legacy_keys.add(node.storage_key)
+        self.db.execute(delete(DavProperty).where(DavProperty.node_key == node.id))
         self.db.delete(node)
         self.db.flush()
 

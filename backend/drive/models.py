@@ -92,6 +92,22 @@ class FileNode(Base):
     content = relationship("StoredObject", back_populates="nodes")
 
 
+class DavProperty(Base):
+    """Custom WebDAV property attached to a stable node id (or ``__root__``)."""
+
+    __tablename__ = "dav_properties"
+    __table_args__ = (
+        UniqueConstraint("node_key", "namespace", "name", name="uq_dav_property"),
+        Index("ix_dav_properties_node", "node_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    node_key: Mapped[str] = mapped_column(String(36), nullable=False)
+    namespace: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
 class StoredObject(Base):
     """Immutable logical content and its ordered Modal/local storage chunks."""
 
