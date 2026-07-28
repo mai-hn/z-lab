@@ -1,8 +1,9 @@
-"""Modal App — on-demand workers ONLY (no always-on web service).
+"""Modal App — scale-to-zero download gateway and on-demand workers.
 
 Cost model:
-  - File upload/download: local API + Volume SDK (batch_upload / read_file).
-    No Modal container is started.
+  - Upload: local API + Volume SDK (batch_upload).
+  - Download: signed Web Function starts on demand and streams Volume chunks
+    directly to the browser. No file bytes pass through the local API.
   - Offline download / heavy processing: spawn Function below → container
     starts only for that job, then exits.
 
@@ -14,7 +15,7 @@ Local API (always on your machine):
   uv run python run_local.py
 """
 
-from __future__ import annotations
+import os
 
 import modal
 
@@ -22,6 +23,10 @@ APP_NAME = "modal-drive"
 VOLUME_NAME = "modal-drive-storage"
 STORAGE_MOUNT = "/storage"
 TASK_DICT_NAME = "modal-drive-tasks"
+DOWNLOAD_SECRET_NAME = os.getenv(
+    "DRIVE_MODAL_DOWNLOAD_SECRET_NAME",
+    "modal-drive-download",
+)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -31,9 +36,18 @@ image = (
     )
 )
 
+download_image = modal.Image.debian_slim(python_version="3.11").pip_install(
+    "fastapi[standard]",
+    "httpx>=0.27.0",
+)
+
 app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 task_dict = modal.Dict.from_name(TASK_DICT_NAME, create_if_missing=True)
+download_secret = modal.Secret.from_name(
+    DOWNLOAD_SECRET_NAME,
+    required_keys=["DRIVE_DOWNLOAD_SIGNING_KEY", "Z_LAB_API_URL"],
+)
 
 
 def _set_progress(task_id: str, **fields) -> None:
@@ -52,6 +66,215 @@ def _cancelled(task_id: str) -> bool:
         return bool(cur.get("cancel"))
     except Exception:
         return False
+
+
+@app.function(
+    image=download_image,
+    volumes={STORAGE_MOUNT: volume.with_mount_options(read_only=True)},
+    secrets=[download_secret],
+    timeout=60 * 60,
+    startup_timeout=60,
+    memory=512,
+    cpu=0.25,
+    min_containers=0,
+    max_containers=10,
+    scaledown_window=30,
+)
+@modal.asgi_app()
+def download_gateway():
+    """Scale-to-zero HTTP gateway: Volume -> browser, never through Z-Lab."""
+    import asyncio
+    import hashlib
+    import hmac
+    import re
+    import time
+    from pathlib import Path
+    from urllib.parse import quote
+
+    import httpx
+    from fastapi import FastAPI, HTTPException, Request, Response
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import StreamingResponse
+
+    web = FastAPI(title="Modal Drive direct download", docs_url=None, redoc_url=None)
+    web.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "HEAD", "OPTIONS"],
+        allow_headers=["Range", "If-Range"],
+        expose_headers=[
+            "Accept-Ranges",
+            "Content-Disposition",
+            "Content-Length",
+            "Content-Range",
+            "ETag",
+            "Last-Modified",
+            "X-Chunk-Count",
+            "X-Download-Provider",
+            "X-File-Size",
+        ],
+    )
+    range_pattern = re.compile(r"bytes=(\d*)-(\d*)")
+    storage_key_pattern = re.compile(r"[A-Za-z0-9._-]{1,160}")
+    manifest_cache: dict[tuple[str, int, str], tuple[float, dict]] = {}
+
+    async def fetch_manifest(node_id: str, expires: int, signature: str) -> dict:
+        if expires < int(time.time()):
+            raise HTTPException(410, "Download link has expired")
+        signed_payload = f"v1\n{node_id}\n{expires}".encode()
+        expected = hmac.new(
+            os.environ["DRIVE_DOWNLOAD_SIGNING_KEY"].encode(),
+            signed_payload,
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise HTTPException(401, "Invalid download signature")
+        cache_key = (node_id, expires, signature)
+        cached = manifest_cache.get(cache_key)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+
+        api_url = os.environ["Z_LAB_API_URL"].rstrip("/")
+        callback_url = f"{api_url}/internal/drive/download-manifests/{node_id}"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    callback_url,
+                    params={"expires": expires, "signature": signature},
+                    headers={"User-Agent": "Z-Lab-Modal-Download/1.0"},
+                )
+        except httpx.HTTPError as error:
+            raise HTTPException(502, f"Cannot query Z-Lab manifest: {error}") from error
+        if response.status_code != 200:
+            detail = response.text[:500] or "Manifest request rejected"
+            raise HTTPException(response.status_code, detail)
+        manifest = response.json()
+        cache_seconds = min(30, max(1, expires - int(time.time())))
+        manifest_cache[cache_key] = (time.monotonic() + cache_seconds, manifest)
+        return manifest
+
+    def chunk_path(storage_key: str) -> Path:
+        if (
+            not storage_key_pattern.fullmatch(storage_key)
+            or storage_key in {".", ".."}
+            or ".." in storage_key
+        ):
+            raise HTTPException(502, "Manifest contains an invalid storage key")
+        return Path(STORAGE_MOUNT) / "files" / storage_key[:2] / storage_key
+
+    @web.get("/health")
+    async def health():
+        return {"status": "ok", "service": "modal-drive-download"}
+
+    @web.api_route("/download/{node_id}", methods=["GET", "HEAD"])
+    async def download(
+        node_id: str,
+        request: Request,
+        expires: int,
+        signature: str,
+    ):
+        manifest = await fetch_manifest(node_id, expires, signature)
+        chunks = sorted(manifest["chunks"], key=lambda item: int(item["index"]))
+        file_size = int(manifest["size"])
+        mime_type = manifest.get("mime_type") or "application/octet-stream"
+        disposition = f"attachment; filename*=UTF-8''{quote(manifest['filename'])}"
+        paths = [(chunk_path(str(chunk["storage_key"])), int(chunk["size"])) for chunk in chunks]
+
+        try:
+            await asyncio.to_thread(volume.reload)
+        except Exception:
+            # A fresh container already has the latest committed snapshot. A
+            # concurrent open file can make reload fail, so let reads proceed.
+            pass
+        if any(not path.is_file() for path, _size in paths):
+            raise HTTPException(404, "One or more Volume chunks are missing")
+
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": disposition,
+            "Content-Type": mime_type,
+            "ETag": str(manifest["etag"]),
+            "Last-Modified": str(manifest["last_modified"]),
+            "X-Chunk-Count": str(len(paths)),
+            "X-Download-Provider": "modal",
+            "X-File-Size": str(file_size),
+        }
+
+        start = 0
+        end = file_size - 1
+        status_code = 200
+        range_header = request.headers.get("range")
+        if range_header:
+            matched = range_pattern.fullmatch(range_header.strip())
+            if not matched:
+                return Response(
+                    status_code=416,
+                    headers={"Content-Range": f"bytes */{file_size}", **headers},
+                )
+            start_text, end_text = matched.groups()
+            if not start_text and not end_text:
+                return Response(
+                    status_code=416,
+                    headers={"Content-Range": f"bytes */{file_size}", **headers},
+                )
+            if not start_text:
+                suffix = int(end_text)
+                if suffix <= 0:
+                    return Response(
+                        status_code=416,
+                        headers={"Content-Range": f"bytes */{file_size}", **headers},
+                    )
+                start = max(file_size - suffix, 0)
+            else:
+                start = int(start_text)
+                end = int(end_text) if end_text else file_size - 1
+            if start >= file_size or end >= file_size or start > end:
+                return Response(
+                    status_code=416,
+                    headers={"Content-Range": f"bytes */{file_size}", **headers},
+                )
+            status_code = 206
+            headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+
+        length = max(0, end - start + 1)
+        headers["Content-Length"] = str(length)
+        if request.method == "HEAD":
+            return Response(status_code=status_code, headers=headers)
+
+        def iter_content():
+            global_offset = 0
+            bytes_left = length
+            for path, chunk_size in paths:
+                chunk_end = global_offset + chunk_size - 1
+                if chunk_end < start:
+                    global_offset += chunk_size
+                    continue
+                if global_offset > end or bytes_left <= 0:
+                    break
+                local_start = max(0, start - global_offset)
+                local_end = min(chunk_size - 1, end - global_offset)
+                wanted = local_end - local_start + 1
+                with path.open("rb") as stream:
+                    stream.seek(local_start)
+                    while wanted > 0:
+                        block = stream.read(min(1024 * 1024, wanted))
+                        if not block:
+                            raise IOError(f"Unexpected end of Volume chunk: {path.name}")
+                        wanted -= len(block)
+                        bytes_left -= len(block)
+                        yield block
+                global_offset += chunk_size
+
+        return StreamingResponse(
+            iter_content(),
+            status_code=status_code,
+            headers=headers,
+            media_type=mime_type,
+        )
+
+    return web
 
 
 @app.function(
@@ -89,7 +312,6 @@ def offline_worker(job: dict) -> dict:
     work.mkdir(parents=True, exist_ok=True)
     files_dir = Path(STORAGE_MOUNT) / "files" / storage_key[:2]
     files_dir.mkdir(parents=True, exist_ok=True)
-    dest = files_dir / storage_key
 
     _set_progress(task_id, status="downloading", progress=0.0, error=None)
 
@@ -385,4 +607,5 @@ def main():
     print(f"  app:    {APP_NAME}")
     print(f"  volume: {VOLUME_NAME}")
     print("  deploy: uv run modal deploy modal_app.py")
-    print("  Local API uses Volume SDK for up/download; spawns offline_worker only when needed.")
+    print("  download_gateway: scale-to-zero Volume -> browser streaming")
+    print("  offline_worker: starts only for an offline download job")

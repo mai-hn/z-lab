@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     modal_environment: str | None = None
     # Modal Dict for offline task progress (no always-on web service)
     modal_task_dict: str = "modal-drive-tasks"
+    # A deployed, scale-to-zero Modal ASGI endpoint used for direct downloads.
+    modal_download_url: str = ""
+    # Shared with the Modal Secret named ``modal-drive-download``.
+    download_signing_key: str = ""
+    download_link_ttl_seconds: int = Field(default=300, ge=30, le=3600)
 
     # SQLite metadata (always local)
     db_name: str = "meta/drive.db"

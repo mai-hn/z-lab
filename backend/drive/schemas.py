@@ -70,6 +70,14 @@ class FileInfoOut(FileNodeOut):
     reference_count: int = 0
 
 
+class DirectDownloadLinkOut(BaseModel):
+    url: str
+    provider: Literal["local", "modal"]
+    expires_at: Optional[datetime] = None
+    size: int
+    filename: str
+
+
 class StorageStats(BaseModel):
     used_bytes: int
     logical_bytes: int = 0

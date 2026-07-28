@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.drive.app import create_app as create_drive_app
 from backend.drive.config import Settings as DriveSettings
+from backend.drive.direct_download import create_manifest_router
 from backend.drive.webdav import create_webdav_router
 from backend.model_checker import router as model_checker_router
 from backend.registry import PROJECTS, public_projects
@@ -55,6 +56,7 @@ drive_app = create_drive_app(drive_settings)
 app.mount("/api/drive", drive_app, name="modal-drive")
 app.mount("/api/router", deepl_router_app, name="deepl-router")
 app.include_router(model_checker_router)
+app.include_router(create_manifest_router(drive_app.state.storage, drive_settings))
 app.include_router(create_webdav_router(drive_app.state.storage, drive_settings))
 
 # Preserve the original public DeepRouter contract for existing clients.

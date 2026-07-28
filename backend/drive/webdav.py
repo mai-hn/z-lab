@@ -440,7 +440,7 @@ def create_webdav_router(storage, settings: Settings) -> APIRouter:
                 node = fs.resolve_path(virtual_path)
                 if node is None or node.node_type == NodeType.directory:
                     raise HTTPException(405, "GET is only available for files")
-                response = download_file(node.id, request, db, storage)
+                response = download_file(node.id, request, db, storage, settings)
                 response.headers.update(
                     {
                         "ETag": _etag(node),

@@ -55,8 +55,49 @@ uv run modal deploy modal_app.py
 ```
 
 Set `DRIVE_STORAGE_BACKEND=modal`, `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`.
-The API uses the Volume SDK for normal reads and writes; an on-demand Modal Function
-starts only for offline downloads.
+The API uses the Volume SDK for uploads and fallback reads; an on-demand Modal
+Function starts only for offline jobs or configured direct downloads.
+
+### Direct downloads from Modal
+
+The optional direct-download gateway keeps file bytes off the Z-Lab server. Z-Lab
+issues a short-lived signed link; the scale-to-zero Modal container validates it,
+queries Z-Lab once for the ordered chunk manifest, and streams the Volume chunks
+straight to the browser or WebDAV client.
+
+Generate one shared key and configure it in the Z-Lab `.env`:
+
+```bash
+openssl rand -hex 32
+```
+
+Set the resulting value as `DRIVE_DOWNLOAD_SIGNING_KEY`, then create a Modal Secret
+with the same value. `Z_LAB_API_URL` must be a public URL that the Modal container
+can reach; it may point at the Next.js site because `/internal/*` is proxied:
+
+```bash
+modal secret create modal-drive-download \
+  DRIVE_DOWNLOAD_SIGNING_KEY=replace-with-the-same-key \
+  Z_LAB_API_URL=https://z-lab.example.com
+```
+
+Deploy the Modal App:
+
+```bash
+uv run modal deploy modal_app.py
+```
+
+Copy the URL printed for `download_gateway` into
+`DRIVE_MODAL_DOWNLOAD_URL`, keep `DRIVE_DOWNLOAD_LINK_TTL_SECONDS=300`, and
+restart Z-Lab:
+
+```bash
+docker compose up -d --build
+```
+
+Direct download activates only when the storage backend is `modal` and both
+`DRIVE_MODAL_DOWNLOAD_URL` and `DRIVE_DOWNLOAD_SIGNING_KEY` are present.
+Otherwise Z-Lab safely falls back to the original server stream.
 
 ## Important routes
 
@@ -82,7 +123,8 @@ username and put the token in the WebDAV password field. Bearer authentication
 and the `X-API-Token` header remain available for API clients.
 
 WebDAV `PUT` writes files larger than 8 MiB as ordered chunks without a
-persistent local file cache. `GET` reads those chunks in order and returns
+persistent local file cache. `GET` redirects to a signed Modal link when direct
+download is configured; otherwise it reads chunks through Z-Lab. Both paths return
 `Content-Length`, `X-File-Size`, `ETag` and `Last-Modified`.
 
 The translation router keeps its public compatibility endpoint at

@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 
 os.environ["Z_LAB_DATA_ROOT"] = tempfile.mkdtemp(prefix="z-lab-test-")
 os.environ["DRIVE_STORAGE_BACKEND"] = "local"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from backend.main import app  # noqa: E402
+from backend.drive.config import Settings, get_settings  # noqa: E402
+from backend.drive.direct_download import (  # noqa: E402
+    create_modal_download_url,
+    sign_download,
+    verify_download_signature,
+)
+from backend.main import app, drive_app, drive_settings  # noqa: E402
 from backend.drive.app import find_frontend_dist  # noqa: E402
 
 
@@ -79,6 +86,11 @@ def test_chunked_upload_and_ordered_download() -> None:
     node = complete.json()
     assert node["size"] == len(content)
     assert node["chunk_count"] == 3
+
+    link = client.get(f"/api/drive/files/{node['id']}/download-link")
+    assert link.status_code == 200
+    assert link.json()["provider"] == "local"
+    assert link.json()["url"] == f"/api/drive/files/{node['id']}/content"
 
     download = client.get(f"/api/drive/files/{node['id']}/content")
     assert download.status_code == 200
@@ -186,3 +198,120 @@ def test_webdav_put_chunks_files_larger_than_eight_mib() -> None:
     assert node["chunk_count"] == 2
     assert client.get("/dav/large-dav.bin").content == content
     assert client.delete("/dav/large-dav.bin").status_code == 204
+
+
+def test_signed_modal_link_and_manifest_callback() -> None:
+    settings = Settings(
+        storage_backend="modal",
+        modal_download_url="https://example--modal-download.modal.run/",
+        download_signing_key="test-signing-key",
+        download_link_ttl_seconds=120,
+    )
+    url, expires = create_modal_download_url("node-123", settings, now=1_000)
+    assert url.startswith(
+        "https://example--modal-download.modal.run/download/node-123?"
+    )
+    assert "expires=1120" in url
+    signature = sign_download("node-123", expires, settings.download_signing_key)
+    verify_download_signature(
+        "node-123",
+        expires,
+        signature,
+        settings.download_signing_key,
+        now=1_001,
+    )
+
+    content = b"signed manifest"
+    uploaded = client.put("/dav/signed-manifest.txt", content=content)
+    assert uploaded.status_code == 201
+    listing = client.get("/api/drive/files", params={"path": "/"}).json()
+    node = next(item for item in listing["items"] if item["name"] == "signed-manifest.txt")
+
+    original_key = drive_settings.download_signing_key
+    drive_settings.download_signing_key = "manifest-callback-key"
+    try:
+        callback_expires = int(time.time()) + 60
+        callback_signature = sign_download(
+            node["id"],
+            callback_expires,
+            drive_settings.download_signing_key,
+        )
+        manifest = client.get(
+            f"/internal/drive/download-manifests/{node['id']}",
+            params={
+                "expires": callback_expires,
+                "signature": callback_signature,
+            },
+        )
+        assert manifest.status_code == 200, manifest.text
+        payload = manifest.json()
+        assert payload["filename"] == "signed-manifest.txt"
+        assert payload["size"] == len(content)
+        assert payload["chunks"][0]["index"] == 0
+
+        rejected = client.get(
+            f"/internal/drive/download-manifests/{node['id']}",
+            params={"expires": callback_expires, "signature": "invalid"},
+        )
+        assert rejected.status_code == 401
+    finally:
+        drive_settings.download_signing_key = original_key
+        assert client.delete("/dav/signed-manifest.txt").status_code == 204
+
+
+def test_browser_and_webdav_downloads_redirect_to_modal() -> None:
+    content = b"modal redirect"
+    uploaded = client.put("/dav/modal-redirect.txt", content=content)
+    assert uploaded.status_code == 201
+    listing = client.get("/api/drive/files", params={"path": "/"}).json()
+    node = next(item for item in listing["items"] if item["name"] == "modal-redirect.txt")
+
+    runtime_settings = get_settings()
+    storage = drive_app.state.storage
+    original_runtime = (
+        runtime_settings.modal_download_url,
+        runtime_settings.download_signing_key,
+    )
+    original_webdav = (
+        drive_settings.modal_download_url,
+        drive_settings.download_signing_key,
+    )
+    storage.__dict__["backend_name"] = lambda: "modal"
+    runtime_settings.modal_download_url = "https://example--download.modal.run"
+    runtime_settings.download_signing_key = "redirect-key"
+    drive_settings.modal_download_url = runtime_settings.modal_download_url
+    drive_settings.download_signing_key = runtime_settings.download_signing_key
+    try:
+        link = client.get(f"/api/drive/files/{node['id']}/download-link")
+        assert link.status_code == 200
+        assert link.json()["provider"] == "modal"
+        assert link.json()["url"].startswith(
+            f"https://example--download.modal.run/download/{node['id']}?"
+        )
+
+        browser = client.get(
+            f"/api/drive/files/{node['id']}/content",
+            follow_redirects=False,
+        )
+        assert browser.status_code == 307
+        assert browser.headers["location"].startswith(
+            f"https://example--download.modal.run/download/{node['id']}?"
+        )
+
+        webdav = client.get("/dav/modal-redirect.txt", follow_redirects=False)
+        assert webdav.status_code == 307
+        assert webdav.headers["location"].startswith(
+            f"https://example--download.modal.run/download/{node['id']}?"
+        )
+        assert webdav.headers["dav"] == "1, 2"
+    finally:
+        storage.__dict__.pop("backend_name", None)
+        (
+            runtime_settings.modal_download_url,
+            runtime_settings.download_signing_key,
+        ) = original_runtime
+        (
+            drive_settings.modal_download_url,
+            drive_settings.download_signing_key,
+        ) = original_webdav
+        assert client.delete("/dav/modal-redirect.txt").status_code == 204

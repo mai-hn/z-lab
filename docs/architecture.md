@@ -41,6 +41,10 @@ so a new project does not need to share domain tables with existing tools.
 7. The browser computes upload/download speed from locally observed byte deltas.
    Offline-task speed is computed from consecutive 1.5-second metadata samples instead
    of trusting a stale server-side rate.
+8. With Modal direct download configured, Z-Lab signs a short-lived URL. The Modal
+   gateway validates it, asks `/internal/drive/download-manifests/{node_id}` for the
+   ordered manifest once, then streams Volume chunks directly to the browser or
+   WebDAV client. Only metadata crosses the Z-Lab server.
 
 ## Adding another project
 

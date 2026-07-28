@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 
-from backend.drive.deps import DbSession, StorageDep
+from backend.drive.deps import DbSession, SettingsDep, StorageDep
+from backend.drive.direct_download import create_modal_download_url, modal_download_enabled
 from backend.drive.models import NodeType
+from backend.drive.schemas import DirectDownloadLinkOut
 from backend.drive.services.fs import FSError, FileService
 
 router = APIRouter(tags=["download"])
@@ -25,6 +28,7 @@ def download_file(
     request: Request,
     db: DbSession,
     storage: StorageDep,
+    settings: SettingsDep,
 ):
     """Download with HTTP Range support for resume / multi-thread / video seek."""
     fs = FileService(db, storage)
@@ -36,6 +40,16 @@ def download_file(
 
     if node.node_type != NodeType.file:
         raise HTTPException(status_code=400, detail="Not a file")
+    if modal_download_enabled(settings, storage.backend_name()):
+        url, _expires = create_modal_download_url(node.id, settings)
+        return RedirectResponse(
+            url,
+            status_code=307,
+            headers={
+                "Cache-Control": "private, no-store",
+                "X-Download-Provider": "modal",
+            },
+        )
     try:
         chunks = fs.content_chunks(node)
     except FSError as e:
@@ -125,6 +139,42 @@ def download_file(
         status_code=200,
         headers=headers,
         media_type=content_type,
+    )
+
+
+@router.get("/files/{node_id}/download-link", response_model=DirectDownloadLinkOut)
+def create_download_link(
+    node_id: str,
+    request: Request,
+    db: DbSession,
+    storage: StorageDep,
+    settings: SettingsDep,
+):
+    fs = FileService(db, storage)
+    try:
+        node = fs.get_node(node_id)
+        assert node is not None
+    except FSError as error:
+        raise _err(error) from error
+    if node.node_type != NodeType.file:
+        raise HTTPException(status_code=400, detail="Not a file")
+
+    if modal_download_enabled(settings, storage.backend_name()):
+        url, expires = create_modal_download_url(node.id, settings)
+        return DirectDownloadLinkOut(
+            url=url,
+            provider="modal",
+            expires_at=datetime.fromtimestamp(expires, tz=timezone.utc),
+            size=int(node.size or 0),
+            filename=node.name,
+        )
+
+    root_path = request.scope.get("root_path", "")
+    return DirectDownloadLinkOut(
+        url=f"{root_path}/files/{quote(node.id, safe='')}/content",
+        provider="local",
+        size=int(node.size or 0),
+        filename=node.name,
     )
 
 

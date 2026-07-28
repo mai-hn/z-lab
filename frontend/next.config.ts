@@ -24,6 +24,10 @@ const nextConfig: NextConfig = {
         destination: `${apiOrigin}/dav/:path*`,
       },
       {
+        source: "/internal/:path*",
+        destination: `${apiOrigin}/internal/:path*`,
+      },
+      {
         source: "/v2/:path*",
         destination: `${apiOrigin}/v2/:path*`,
       },

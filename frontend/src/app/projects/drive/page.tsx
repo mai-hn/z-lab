@@ -55,10 +55,18 @@ type Transfer = {
   transferred: number;
   total: number;
   speed: number;
+  provider?: DirectDownloadLink["provider"];
   error?: string;
 };
 type SpeedSample = { bytes: number; at: number; speed: number };
 type UploadSession = { id: string; total_chunks: number; chunk_size: number };
+type DirectDownloadLink = {
+  url: string;
+  provider: "local" | "modal";
+  expires_at: string | null;
+  size: number;
+  filename: string;
+};
 type WritableTarget = {
   write(data: Uint8Array): Promise<void>;
   close(): Promise<void>;
@@ -243,6 +251,14 @@ export default function DrivePage() {
     );
   }
 
+  function setTransferProvider(id: string, provider: DirectDownloadLink["provider"]) {
+    setTransfers((current) =>
+      current.map((transfer) =>
+        transfer.id === id ? { ...transfer, provider } : transfer,
+      ),
+    );
+  }
+
   async function upload(file: File) {
     const id = addTransfer(file.name, "upload", file.size);
     setBusy(true);
@@ -296,7 +312,11 @@ export default function DrivePage() {
         const handle = await picker({ suggestedName: node.name });
         writable = await handle.createWritable();
       }
-      const response = await fetch(`${BASE}/files/${node.id}/content`);
+      const directLink = await api<DirectDownloadLink>(
+        `${BASE}/files/${node.id}/download-link`,
+      );
+      setTransferProvider(id, directLink.provider);
+      const response = await fetch(directLink.url);
       if (!response.ok || !response.body) {
         const payload = await response.json().catch(() => ({ detail: response.statusText }));
         throw new Error(payload.detail?.message ?? payload.detail ?? "下载失败");
@@ -584,7 +604,8 @@ export default function DrivePage() {
             <p>
               服务地址为 <code>http(s)://host:port/dav</code>。支持 OPTIONS、PROPFIND、GET、HEAD、
               PUT、MKCOL、DELETE、MOVE、COPY 与 PROPPATCH；设置 DRIVE_API_TOKEN 后，以任意用户名和
-              token 作为密码登录。
+              token 作为密码登录。Modal 直传启用后，浏览器下载和 WebDAV GET 会使用短期签名链接，
+              文件字节由按需启动的 Modal 容器直接返回。
             </p>
           </div>
           <div className="panel storage-note storage-note-secondary">
@@ -653,7 +674,10 @@ function TransferRow({ transfer }: { transfer: Transfer }) {
       <div className="transfer-main">
         <div className="transfer-meta">
           <strong>{transfer.name}</strong>
-          <span>{formatBytes(transfer.transferred)} / {formatBytes(transfer.total)}</span>
+          <span>
+            {transfer.provider === "modal" ? "MODAL DIRECT · " : ""}
+            {formatBytes(transfer.transferred)} / {formatBytes(transfer.total)}
+          </span>
         </div>
         <div className="transfer-track"><span style={{ width: `${progress}%` }} /></div>
         {transfer.error ? <small className="transfer-error">{transfer.error}</small> : null}
