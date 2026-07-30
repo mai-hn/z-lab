@@ -1,4 +1,9 @@
 import {
+  findModel,
+  getChannelCredentials,
+  recordModelRequest,
+} from "@/lib/model-tester-database"
+import {
   gatewayErrorResponse,
   gatewayTimeouts,
   ModelGatewayError,
@@ -8,8 +13,7 @@ import {
 } from "@/lib/model-checker"
 
 type ChatRequest = {
-  baseUrl?: unknown
-  apiKey?: unknown
+  channelId?: unknown
   model?: unknown
   prompt?: unknown
   systemPrompt?: unknown
@@ -33,27 +37,28 @@ export const dynamic = "force-dynamic"
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as ChatRequest
-    const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : ""
-    const apiKey = typeof body.apiKey === "string" ? body.apiKey : ""
+    const channelId = typeof body.channelId === "string" ? body.channelId.trim() : ""
     const model = typeof body.model === "string" ? body.model.trim() : ""
     const prompt = typeof body.prompt === "string" ? body.prompt.trim() : ""
     const systemPrompt = typeof body.systemPrompt === "string" ? body.systemPrompt.trim() : ""
     const stream = body.stream !== false
 
-    if (!baseUrl || !model || !prompt) {
-      throw new ModelGatewayError("接口地址、模型和提示词不能为空。", 400)
+    if (!channelId || !model || !prompt) {
+      throw new ModelGatewayError("渠道、模型和提示词不能为空。", 400)
     }
-    if (baseUrl.length > 500 || apiKey.length > 10_000 || model.length > 300) {
+    if (model.length > 300 || prompt.length > 100_000 || systemPrompt.length > 30_000) {
       throw new ModelGatewayError("请求参数过长。", 400)
     }
-    if (prompt.length > 100_000 || systemPrompt.length > 30_000) {
-      throw new ModelGatewayError("提示词内容过长。", 400)
-    }
+
+    const channel = getChannelCredentials(channelId)
+    const modelRecord = findModel(channelId, model)
+    if (!channel) throw new ModelGatewayError("渠道不存在或已停用。", 404)
+    if (!modelRecord) throw new ModelGatewayError("模型记录不存在或已停用。", 404)
+    const modelRecordId = modelRecord.id
 
     const messages = []
     if (systemPrompt) messages.push({ role: "system", content: systemPrompt })
     messages.push({ role: "user", content: prompt })
-
     const upstreamBody = {
       model,
       messages,
@@ -63,46 +68,166 @@ export async function POST(request: Request) {
       frequency_penalty: numberInRange(body.frequencyPenalty, 0, -2, 2),
       stream,
     }
-
-    const url = await providerUrl(baseUrl, "chat/completions")
-    const response = await fetch(url, {
-      method: "POST",
-      headers: providerHeaders(apiKey),
-      body: JSON.stringify(upstreamBody),
-      cache: "no-store",
-      redirect: "error",
-      signal: AbortSignal.any([
-        request.signal,
-        AbortSignal.timeout(gatewayTimeouts.chat),
-      ]),
-    })
-
-    if (!response.ok) {
-      throw new ModelGatewayError(await providerError(response), response.status)
+    const requestSummary = {
+      temperature: upstreamBody.temperature,
+      maxTokens: upstreamBody.max_tokens,
+      topP: upstreamBody.top_p,
+      frequencyPenalty: upstreamBody.frequency_penalty,
+      stream,
+    }
+    const startedAt = performance.now()
+    const url = await providerUrl(channel.baseUrl, "chat/completions")
+    let response: Response
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: providerHeaders(channel.apiKey),
+        body: JSON.stringify(upstreamBody),
+        cache: "no-store",
+        redirect: "error",
+        signal: AbortSignal.any([
+          request.signal,
+          AbortSignal.timeout(gatewayTimeouts.chat),
+        ]),
+      })
+    } catch (error) {
+      recordModelRequest({
+        channelId,
+        modelRecordId,
+        modelId: model,
+        requestType: "chat",
+        status: request.signal.aborted ? "cancelled" : "error",
+        latencyMs: Math.round(performance.now() - startedAt),
+        promptPreview: prompt,
+        request: requestSummary,
+        errorMessage: error instanceof Error ? error.message : "无法连接模型服务。",
+      })
+      throw error
     }
 
-    if (stream) {
-      return new Response(response.body, {
-        headers: {
-          "Cache-Control": "no-cache, no-store",
-          "Content-Type": response.headers.get("content-type") || "text/event-stream; charset=utf-8",
-          "X-Accel-Buffering": "no",
-        },
+    if (!response.ok) {
+      const message = await providerError(response)
+      recordModelRequest({
+        channelId,
+        modelRecordId,
+        modelId: model,
+        requestType: "chat",
+        status: "error",
+        httpStatus: response.status,
+        latencyMs: Math.round(performance.now() - startedAt),
+        promptPreview: prompt,
+        request: requestSummary,
+        errorMessage: message,
+      })
+      throw new ModelGatewayError(message, response.status)
+    }
+
+    if (!stream) {
+      const payload = (await response.json()) as {
+        choices?: Array<{ message?: { content?: unknown } }>
+        usage?: {
+          prompt_tokens?: number
+          completion_tokens?: number
+          total_tokens?: number
+        }
+      }
+      const value = payload.choices?.[0]?.message?.content
+      const content = typeof value === "string" ? value : ""
+      recordModelRequest({
+        channelId,
+        modelRecordId,
+        modelId: model,
+        requestType: "chat",
+        status: "success",
+        httpStatus: response.status,
+        latencyMs: Math.round(performance.now() - startedAt),
+        promptPreview: prompt,
+        request: requestSummary,
+        usage: payload.usage,
+        responseChars: content.length,
+      })
+      return Response.json(
+        { content, usage: payload.usage || null },
+        { headers: { "Cache-Control": "no-store" } },
+      )
+    }
+
+    if (!response.body) {
+      throw new ModelGatewayError("模型服务没有返回响应流。", 502)
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ""
+    let responseChars = 0
+    let recorded = false
+
+    function finish(status: "success" | "error" | "cancelled", errorMessage?: string) {
+      if (recorded) return
+      recorded = true
+      recordModelRequest({
+        channelId,
+        modelRecordId,
+        modelId: model,
+        requestType: "chat",
+        status,
+        httpStatus: response.status,
+        latencyMs: Math.round(performance.now() - startedAt),
+        promptPreview: prompt,
+        request: requestSummary,
+        responseChars,
+        errorMessage,
       })
     }
 
-    const payload = (await response.json()) as {
-      choices?: Array<{ message?: { content?: unknown } }>
-      usage?: unknown
+    function inspectChunk(chunk: Uint8Array) {
+      buffer += decoder.decode(chunk, { stream: true })
+      const lines = buffer.split(/\r?\n/)
+      buffer = lines.pop() || ""
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue
+        const data = line.slice(5).trim()
+        if (!data || data === "[DONE]") continue
+        try {
+          const payload = JSON.parse(data) as {
+            choices?: Array<{ delta?: { content?: unknown } }>
+          }
+          const delta = payload.choices?.[0]?.delta?.content
+          if (typeof delta === "string") responseChars += delta.length
+        } catch {
+          // Ignore non-JSON SSE fields while preserving the upstream stream.
+        }
+      }
     }
-    const content = payload.choices?.[0]?.message?.content
-    return Response.json(
-      {
-        content: typeof content === "string" ? content : "",
-        usage: payload.usage || null,
+
+    const loggedStream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { value, done } = await reader.read()
+          if (done) {
+            finish("success")
+            controller.close()
+            return
+          }
+          inspectChunk(value)
+          controller.enqueue(value)
+        } catch (error) {
+          finish("error", error instanceof Error ? error.message : "流式响应失败。")
+          controller.error(error)
+        }
       },
-      { headers: { "Cache-Control": "no-store" } },
-    )
+      async cancel(reason) {
+        finish("cancelled", "客户端停止了流式请求。")
+        await reader.cancel(reason)
+      },
+    })
+
+    return new Response(loggedStream, {
+      headers: {
+        "Cache-Control": "no-cache, no-store",
+        "Content-Type": response.headers.get("content-type") || "text/event-stream; charset=utf-8",
+        "X-Accel-Buffering": "no",
+      },
+    })
   } catch (error) {
     return gatewayErrorResponse(error)
   }

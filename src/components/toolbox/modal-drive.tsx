@@ -5,6 +5,8 @@ import {
   ArchiveIcon,
   ChevronRightIcon,
   CloudIcon,
+  CloudDownloadIcon,
+  CopyIcon,
   DownloadIcon,
   FileIcon,
   FileImageIcon,
@@ -15,11 +17,13 @@ import {
   KeyRoundIcon,
   LockKeyholeIcon,
   LogOutIcon,
+  MoveRightIcon,
   PencilIcon,
   PlusIcon,
   RefreshCwIcon,
   SearchIcon,
   ShieldCheckIcon,
+  SquareIcon,
   Trash2Icon,
   UploadCloudIcon,
 } from "lucide-react"
@@ -27,7 +31,7 @@ import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { Button, buttonVariants } from "@/components/ui/button"
 import {
   Card,
   CardAction,
@@ -67,6 +71,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
+import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
 type DriveEntry = {
@@ -87,6 +92,88 @@ type DriveSession = {
   configured: boolean
   protected: boolean
   authorized: boolean
+}
+
+type OfflineDownloadResult = {
+  url: string
+  status: "completed" | "failed" | "canceled"
+  entry?: DriveEntry
+  error?: string
+}
+
+type OfflineDownloadJob = {
+  ok: boolean
+  jobId: string
+  status:
+    | "queued"
+    | "pending"
+    | "downloading"
+    | "canceling"
+    | "completed"
+    | "canceled"
+    | "failed"
+  path?: string
+  total?: number
+  completed?: number
+  failed?: number
+  currentIndex?: number | null
+  currentUrl?: string | null
+  currentFileName?: string | null
+  currentBytes?: number
+  currentTotalBytes?: number | null
+  bytesPerSecond?: number
+  totalBytesDownloaded?: number
+  error?: string
+  legacy?: boolean
+  results?: OfflineDownloadResult[]
+}
+
+type TransferJob = {
+  ok: boolean
+  jobId: string
+  operation: "copy" | "move"
+  status:
+    | "queued"
+    | "preparing"
+    | "transferring"
+    | "finalizing"
+    | "canceling"
+    | "completed"
+    | "canceled"
+    | "failed"
+  sourcePath: string
+  destinationPath: string
+  currentBytes?: number
+  currentTotalBytes?: number | null
+  bytesPerSecond?: number
+  currentFileName?: string | null
+  completedFiles?: number
+  totalFiles?: number | null
+  entry?: DriveEntry
+  error?: string
+}
+
+const ACTIVE_OFFLINE_STATUSES = new Set([
+  "queued",
+  "pending",
+  "downloading",
+  "canceling",
+])
+
+function isOfflineDownloadActive(status?: string) {
+  return Boolean(status && ACTIVE_OFFLINE_STATUSES.has(status))
+}
+
+const ACTIVE_TRANSFER_STATUSES = new Set([
+  "queued",
+  "preparing",
+  "transferring",
+  "finalizing",
+  "canceling",
+])
+
+function isTransferActive(status?: string) {
+  return Boolean(status && ACTIVE_TRANSFER_STATUSES.has(status))
 }
 
 function formatBytes(bytes: number) {
@@ -112,6 +199,188 @@ function joinPath(directory: string, name: string) {
   return `${directory === "/" ? "" : directory}/${name}`
 }
 
+function OfflineDownloadProgress({
+  job,
+  stopping,
+  onStop,
+}: {
+  job: OfflineDownloadJob
+  stopping: boolean
+  onStop: () => void
+}) {
+  const currentBytes = job.currentBytes || 0
+  const currentTotalBytes = job.currentTotalBytes || 0
+  const percentage =
+    currentTotalBytes > 0
+      ? Math.min(100, Math.max(0, (currentBytes / currentTotalBytes) * 100))
+      : null
+  const canceling = job.status === "canceling"
+  const title =
+    job.legacy
+      ? "旧版本任务运行中"
+      : job.status === "queued" || job.status === "pending"
+      ? "任务排队中"
+      : canceling
+        ? "正在停止下载"
+        : `正在下载 ${job.currentIndex || 1} / ${job.total || 1}`
+
+  return (
+    <div className="space-y-3 rounded-xl border bg-muted/30 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 text-sm font-medium">
+            <Spinner className="size-3.5" />
+            {title}
+          </p>
+          <p className="mt-1 truncate text-xs text-muted-foreground">
+            {canceling
+              ? "等待 worker 清理当前临时文件…"
+              : job.currentFileName ||
+                job.currentUrl ||
+                (job.legacy
+                  ? "旧任务不提供字节进度，但可以强制停止。"
+                  : "等待 Modal worker 接收任务…")}
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          disabled={stopping || canceling}
+          onClick={onStop}
+        >
+          {stopping || canceling ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <SquareIcon data-icon="inline-start" />
+          )}
+          {canceling ? "停止中" : "停止下载"}
+        </Button>
+      </div>
+
+      <div
+        className="h-2 overflow-hidden rounded-full bg-muted"
+        role="progressbar"
+        aria-label="当前文件下载进度"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percentage === null ? undefined : Math.round(percentage)}
+      >
+        <div
+          className={cn(
+            "h-full rounded-full bg-primary transition-[width] duration-300",
+            percentage === null && "w-1/3 animate-pulse",
+          )}
+          style={percentage === null ? undefined : { width: `${percentage}%` }}
+        />
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs tabular-nums text-muted-foreground">
+        <span>
+          {formatBytes(currentBytes)}
+          {currentTotalBytes > 0 ? ` / ${formatBytes(currentTotalBytes)}` : ""}
+          {percentage !== null ? ` · ${percentage.toFixed(1)}%` : ""}
+        </span>
+        <span>
+          {job.bytesPerSecond ? `${formatBytes(job.bytesPerSecond)}/s · ` : ""}
+          已完成 {job.completed || 0} · 失败 {job.failed || 0}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function TransferProgress({
+  job,
+  stopping,
+  onStop,
+}: {
+  job: TransferJob
+  stopping: boolean
+  onStop: () => void
+}) {
+  const currentBytes = job.currentBytes || 0
+  const currentTotalBytes = job.currentTotalBytes || 0
+  const percentage =
+    currentTotalBytes > 0
+      ? Math.min(100, Math.max(0, (currentBytes / currentTotalBytes) * 100))
+      : null
+  const canceling = job.status === "canceling"
+  const operationName = job.operation === "copy" ? "复制" : "移动"
+  const title =
+    job.status === "queued"
+      ? `${operationName}任务排队中`
+      : job.status === "preparing"
+        ? `正在统计${operationName}内容`
+        : job.status === "finalizing"
+          ? `正在完成${operationName}`
+          : canceling
+            ? `正在停止${operationName}`
+            : `正在${operationName}`
+
+  return (
+    <div className="space-y-3 rounded-xl border bg-muted/30 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 text-sm font-medium">
+            <Spinner className="size-3.5" />
+            {title}
+          </p>
+          <p className="mt-1 truncate text-xs text-muted-foreground">
+            {canceling
+              ? "等待 worker 停止当前 rclone 进程…"
+              : job.currentFileName || `${job.sourcePath} → ${job.destinationPath}`}
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          disabled={stopping || canceling || job.status === "finalizing"}
+          onClick={onStop}
+        >
+          {stopping || canceling ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <SquareIcon data-icon="inline-start" />
+          )}
+          {canceling ? "停止中" : "停止任务"}
+        </Button>
+      </div>
+
+      <div
+        className="h-2 overflow-hidden rounded-full bg-muted"
+        role="progressbar"
+        aria-label={`${operationName}进度`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percentage === null ? undefined : Math.round(percentage)}
+      >
+        <div
+          className={cn(
+            "h-full rounded-full bg-primary transition-[width] duration-300",
+            percentage === null && "w-1/3 animate-pulse",
+          )}
+          style={percentage === null ? undefined : { width: `${percentage}%` }}
+        />
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs tabular-nums text-muted-foreground">
+        <span>
+          {formatBytes(currentBytes)}
+          {currentTotalBytes > 0 ? ` / ${formatBytes(currentTotalBytes)}` : ""}
+          {percentage !== null ? ` · ${percentage.toFixed(1)}%` : ""}
+        </span>
+        <span>
+          {job.bytesPerSecond ? `${formatBytes(job.bytesPerSecond)}/s · ` : ""}
+          已完成 {job.completedFiles || 0}
+          {job.totalFiles ? ` / ${job.totalFiles}` : ""} 个文件
+        </span>
+      </div>
+    </div>
+  )
+}
+
 function EntryGlyph({ entry }: { entry: DriveEntry }) {
   if (entry.type === "directory") return <FolderIcon className="size-4.5" />
   const extension = entry.name.split(".").pop()?.toLowerCase() || ""
@@ -129,12 +398,44 @@ function EntryGlyph({ entry }: { entry: DriveEntry }) {
 
 async function responseMessage(response: Response) {
   const payload = (await response.json().catch(() => null)) as {
-    message?: string
-    detail?: string
+    message?: unknown
+    detail?: unknown
     code?: string
   } | null
+
+  function readableDetail(value: unknown): string | null {
+    if (typeof value === "string" && value.trim()) return value
+    if (Array.isArray(value)) {
+      const messages = value
+        .map((item) => {
+          if (!item || typeof item !== "object") return readableDetail(item)
+          const detail = item as { loc?: unknown; msg?: unknown }
+          const message =
+            typeof detail.msg === "string" ? detail.msg.trim() : ""
+          const location = Array.isArray(detail.loc)
+            ? detail.loc.filter((part) => typeof part === "string").join(".")
+            : ""
+          if (!message) return null
+          return location ? `${location}：${message}` : message
+        })
+        .filter((message): message is string => Boolean(message))
+      return messages.length ? messages.join("；") : null
+    }
+    if (value && typeof value === "object") {
+      try {
+        return JSON.stringify(value)
+      } catch {
+        return null
+      }
+    }
+    return null
+  }
+
   return {
-    message: payload?.message || payload?.detail || `请求失败（HTTP ${response.status}）`,
+    message:
+      readableDetail(payload?.message) ||
+      readableDetail(payload?.detail) ||
+      `请求失败（HTTP ${response.status}）`,
     code: payload?.code,
   }
 }
@@ -173,13 +474,20 @@ function DriveRow({
   entry,
   onOpen,
   onRename,
+  onCopy,
+  onMove,
   onDelete,
 }: {
   entry: DriveEntry
   onOpen: (entry: DriveEntry) => void
   onRename: (entry: DriveEntry) => void
+  onCopy: (entry: DriveEntry) => void
+  onMove: (entry: DriveEntry) => void
   onDelete: (entry: DriveEntry) => void
 }) {
+  const isCloudRoot =
+    entry.path === "/Cloud" || /^\/Cloud\/[^/]+$/.test(entry.path)
+
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b px-3 py-2.5 last:border-b-0 sm:grid-cols-[minmax(0,1fr)_100px_140px_auto] sm:px-4">
       <Button
@@ -204,37 +512,54 @@ function DriveRow({
       </span>
       <div className="flex items-center justify-end gap-1">
         {entry.type === "file" ? (
-          <Button
-            render={
-              <a
-                href={`/api/modal-drive/download?path=${encodeURIComponent(entry.path)}`}
-                aria-label={`下载 ${entry.name}`}
-              />
-            }
-            variant="ghost"
-            size="icon-sm"
+          <a
+            href={`/api/modal-drive/download?path=${encodeURIComponent(entry.path)}`}
+            aria-label={`下载 ${entry.name}`}
+            className={buttonVariants({ variant: "ghost", size: "icon-sm" })}
           >
             <DownloadIcon />
-          </Button>
+          </a>
         ) : null}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label={`重命名 ${entry.name}`}
-          onClick={() => onRename(entry)}
-        >
-          <PencilIcon />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label={`删除 ${entry.name}`}
-          onClick={() => onDelete(entry)}
-        >
-          <Trash2Icon />
-        </Button>
+        {!isCloudRoot ? (
+          <>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`复制 ${entry.name}`}
+              onClick={() => onCopy(entry)}
+            >
+              <CopyIcon />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`移动 ${entry.name}`}
+              onClick={() => onMove(entry)}
+            >
+              <MoveRightIcon />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`重命名 ${entry.name}`}
+              onClick={() => onRename(entry)}
+            >
+              <PencilIcon />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`删除 ${entry.name}`}
+              onClick={() => onDelete(entry)}
+            >
+              <Trash2Icon />
+            </Button>
+          </>
+        ) : null}
       </div>
     </div>
   )
@@ -256,9 +581,20 @@ export function ModalDrive() {
   const [folderName, setFolderName] = React.useState("")
   const [renameTarget, setRenameTarget] = React.useState<DriveEntry | null>(null)
   const [renameName, setRenameName] = React.useState("")
+  const [transferTarget, setTransferTarget] = React.useState<DriveEntry | null>(null)
+  const [transferOperation, setTransferOperation] = React.useState<"copy" | "move">("copy")
+  const [transferDestination, setTransferDestination] = React.useState("")
+  const [transferJob, setTransferJob] = React.useState<TransferJob | null>(null)
+  const [transferStopping, setTransferStopping] = React.useState(false)
   const [deleteTarget, setDeleteTarget] = React.useState<DriveEntry | null>(null)
+  const [offlineOpen, setOfflineOpen] = React.useState(false)
+  const [offlineLinks, setOfflineLinks] = React.useState("")
+  const [offlineSubmitting, setOfflineSubmitting] = React.useState(false)
+  const [offlineStopping, setOfflineStopping] = React.useState(false)
+  const [offlineJob, setOfflineJob] = React.useState<OfflineDownloadJob | null>(null)
   const [mutating, setMutating] = React.useState(false)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
+  const isCloudIndex = path === "/Cloud"
 
   const handleUnauthorized = React.useCallback(() => {
     setSession((current) => current ? { ...current, authorized: false } : current)
@@ -310,6 +646,148 @@ export function ModalDrive() {
     }
   }, [loadFiles])
 
+  const offlineJobId = offlineJob?.jobId
+  const offlineJobPath = offlineJob?.path
+  const offlineJobStatus = offlineJob?.status
+
+  React.useEffect(() => {
+    if (!offlineJobId || !isOfflineDownloadActive(offlineJobStatus)) {
+      return
+    }
+
+    const jobId = offlineJobId
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const jobPath = offlineJobPath
+
+    async function poll() {
+      try {
+        const response = await fetch(
+          `/api/modal-drive/offline-download?jobId=${encodeURIComponent(jobId)}`,
+          { cache: "no-store" },
+        )
+        if (!response.ok) {
+          const details = await responseMessage(response)
+          if (response.status === 401) handleUnauthorized()
+          throw new Error(details.message)
+        }
+
+        const payload = (await response.json()) as OfflineDownloadJob
+        if (disposed) return
+        setOfflineJob((current) =>
+          current?.jobId === jobId ? { ...current, ...payload } : current,
+        )
+
+        if (!isOfflineDownloadActive(payload.status)) {
+          const completed = payload.completed || 0
+          const failed = payload.failed || 0
+          if (completed > 0 && (payload.path || jobPath) === path) {
+            await loadFiles(path)
+          }
+          if (payload.status === "canceled") {
+            toast.info(`离线下载已停止，已保存 ${completed} 个文件`)
+          } else if (payload.status === "failed") {
+            toast.error(payload.error || "离线下载任务失败")
+          } else if (failed > 0) {
+            toast.warning(`离线下载完成：成功 ${completed} 个，失败 ${failed} 个`)
+          } else {
+            toast.success(`离线下载完成：已保存 ${completed} 个文件`)
+          }
+          return
+        }
+
+        timer = setTimeout(poll, 1_000)
+      } catch (requestError) {
+        if (disposed) return
+        const message =
+          requestError instanceof Error ? requestError.message : "无法读取下载状态。"
+        setOfflineJob((current) =>
+          current && current.jobId === jobId
+            ? { ...current, status: "failed" }
+            : current,
+        )
+        setError(message)
+      }
+    }
+
+    timer = setTimeout(poll, 1_000)
+    return () => {
+      disposed = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [
+    handleUnauthorized,
+    loadFiles,
+    offlineJobId,
+    offlineJobPath,
+    offlineJobStatus,
+    path,
+  ])
+
+  const transferJobId = transferJob?.jobId
+  const transferJobStatus = transferJob?.status
+
+  React.useEffect(() => {
+    if (!transferJobId || !isTransferActive(transferJobStatus)) return
+
+    const jobId = transferJobId
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    async function poll() {
+      try {
+        const response = await fetch(
+          `/api/modal-drive/transfer?jobId=${encodeURIComponent(jobId)}`,
+          { cache: "no-store" },
+        )
+        if (!response.ok) {
+          const details = await responseMessage(response)
+          if (response.status === 401) handleUnauthorized()
+          throw new Error(details.message)
+        }
+
+        const payload = (await response.json()) as TransferJob
+        if (disposed) return
+        setTransferJob((current) =>
+          current?.jobId === jobId ? { ...current, ...payload } : current,
+        )
+
+        if (!isTransferActive(payload.status)) {
+          if (payload.status === "completed") {
+            toast.success(payload.operation === "copy" ? "复制完成" : "移动完成")
+            await loadFiles(path)
+          } else if (payload.status === "canceled") {
+            toast.info(payload.operation === "copy" ? "复制已停止" : "移动已停止")
+          } else {
+            toast.error(payload.error || "文件传输失败")
+          }
+          return
+        }
+        timer = setTimeout(poll, 1_000)
+      } catch (requestError) {
+        if (disposed) return
+        const message =
+          requestError instanceof Error ? requestError.message : "无法读取传输状态。"
+        setTransferJob((current) =>
+          current?.jobId === jobId ? { ...current, status: "failed" } : current,
+        )
+        setError(message)
+      }
+    }
+
+    timer = setTimeout(poll, 500)
+    return () => {
+      disposed = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [
+    handleUnauthorized,
+    loadFiles,
+    path,
+    transferJobId,
+    transferJobStatus,
+  ])
+
   const filteredEntries = React.useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase()
     if (!normalized) return entries
@@ -355,6 +833,10 @@ export function ModalDrive() {
   async function uploadFiles(files: FileList | File[]) {
     const selectedFiles = Array.from(files)
     if (selectedFiles.length === 0) return
+    if (isCloudIndex) {
+      setError("请先进入 Cloud 中的一个远程网盘文件夹。")
+      return
+    }
 
     setUploading(true)
     setError("")
@@ -412,6 +894,74 @@ export function ModalDrive() {
     }
   }
 
+  async function startOfflineDownload() {
+    const urls = offlineLinks
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean)
+    if (urls.length === 0) {
+      setError("请至少输入一个下载链接。")
+      return
+    }
+    if (urls.length > 50) {
+      setError("每个离线下载任务最多支持 50 个链接。")
+      return
+    }
+
+    setOfflineSubmitting(true)
+    setError("")
+    try {
+      const response = await fetch("/api/modal-drive/offline-download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, urls }),
+      })
+      if (!response.ok) {
+        const details = await responseMessage(response)
+        if (response.status === 401) handleUnauthorized()
+        throw new Error(details.message)
+      }
+      const job = (await response.json()) as OfflineDownloadJob
+      setOfflineJob(job)
+      toast.success(`已提交 ${urls.length} 个链接，将按顺序下载`)
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error ? requestError.message : "提交离线下载失败。",
+      )
+    } finally {
+      setOfflineSubmitting(false)
+    }
+  }
+
+  async function stopOfflineDownload() {
+    if (!offlineJob?.jobId || !isOfflineDownloadActive(offlineJob.status)) return
+
+    setOfflineStopping(true)
+    setError("")
+    try {
+      const response = await fetch(
+        `/api/modal-drive/offline-download?jobId=${encodeURIComponent(offlineJob.jobId)}`,
+        { method: "DELETE" },
+      )
+      if (!response.ok) {
+        const details = await responseMessage(response)
+        if (response.status === 401) handleUnauthorized()
+        throw new Error(details.message)
+      }
+      const payload = (await response.json()) as OfflineDownloadJob
+      setOfflineJob((current) =>
+        current?.jobId === payload.jobId ? { ...current, ...payload } : current,
+      )
+      toast.info("已发送停止请求")
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error ? requestError.message : "停止离线下载失败。",
+      )
+    } finally {
+      setOfflineStopping(false)
+    }
+  }
+
   async function renameEntry() {
     const nextName = renameName.trim()
     if (!renameTarget || !nextName || nextName.includes("/") || nextName.includes("\\")) {
@@ -457,6 +1007,82 @@ export function ModalDrive() {
     }
   }
 
+  function openTransfer(entry: DriveEntry, operation: "copy" | "move") {
+    if (isTransferActive(transferJob?.status)) {
+      toast.info("请先等待当前复制或移动任务结束")
+      return
+    }
+    setTransferTarget(entry)
+    setTransferOperation(operation)
+    setTransferDestination("")
+    setError("")
+  }
+
+  async function transferEntry() {
+    const destinationPath = transferDestination.trim()
+    if (!transferTarget || !destinationPath.startsWith("/")) {
+      setError("请输入以 / 开头的完整目标路径。")
+      return
+    }
+    if (destinationPath === transferTarget.path) {
+      setError("目标路径不能与源路径相同。")
+      return
+    }
+
+    setMutating(true)
+    setError("")
+    try {
+      const response = await fetch(`/api/modal-drive/${transferOperation}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourcePath: transferTarget.path,
+          destinationPath,
+        }),
+      })
+      if (!response.ok) throw new Error((await responseMessage(response)).message)
+      const job = (await response.json()) as TransferJob
+      setTransferJob(job)
+      setTransferTarget(null)
+      setTransferDestination("")
+      toast.success(transferOperation === "copy" ? "复制任务已提交" : "移动任务已提交")
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : transferOperation === "copy"
+            ? "复制失败。"
+            : "移动失败。",
+      )
+    } finally {
+      setMutating(false)
+    }
+  }
+
+  async function stopTransfer() {
+    if (!transferJob?.jobId || !isTransferActive(transferJob.status)) return
+    setTransferStopping(true)
+    setError("")
+    try {
+      const response = await fetch(
+        `/api/modal-drive/transfer?jobId=${encodeURIComponent(transferJob.jobId)}`,
+        { method: "DELETE" },
+      )
+      if (!response.ok) throw new Error((await responseMessage(response)).message)
+      const payload = (await response.json()) as TransferJob
+      setTransferJob((current) =>
+        current?.jobId === payload.jobId ? { ...current, ...payload } : current,
+      )
+      toast.info("已发送停止请求")
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error ? requestError.message : "停止传输失败。",
+      )
+    } finally {
+      setTransferStopping(false)
+    }
+  }
+
   function openEntry(entry: DriveEntry) {
     if (entry.type === "directory") {
       void loadFiles(entry.path)
@@ -476,11 +1102,11 @@ export function ModalDrive() {
             Modal 网盘
           </h1>
           <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-            使用 Modal Volume 保存文件，通过 Python API 安全管理目录、上传与下载。
+            使用 Modal Volume 保存本地文件，并通过 rclone 在 Cloud 目录访问外部网盘。
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Badge variant="outline"><CloudIcon data-icon="inline-start" />Volume</Badge>
+          <Badge variant="outline"><CloudIcon data-icon="inline-start" />Volume + rclone</Badge>
           <Badge variant="outline"><ShieldCheckIcon data-icon="inline-start" />Proxy Auth</Badge>
         </div>
       </div>
@@ -611,6 +1237,20 @@ export function ModalDrive() {
             </CardAction>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
+            {offlineJob && isOfflineDownloadActive(offlineJob.status) ? (
+              <OfflineDownloadProgress
+                job={offlineJob}
+                stopping={offlineStopping}
+                onStop={() => void stopOfflineDownload()}
+              />
+            ) : null}
+            {transferJob && isTransferActive(transferJob.status) ? (
+              <TransferProgress
+                job={transferJob}
+                stopping={transferStopping}
+                onStop={() => void stopTransfer()}
+              />
+            ) : null}
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <PathBreadcrumbs path={path} onNavigate={(nextPath) => void loadFiles(nextPath)} />
               <div className="flex flex-wrap items-center gap-2">
@@ -623,13 +1263,31 @@ export function ModalDrive() {
                     aria-label="搜索当前目录"
                   />
                 </InputGroup>
-                <Button type="button" variant="outline" onClick={() => setFolderOpen(true)}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={isCloudIndex}
+                  onClick={() => setFolderOpen(true)}
+                >
                   <PlusIcon data-icon="inline-start" />
                   新建文件夹
                 </Button>
                 <Button
                   type="button"
-                  disabled={uploading}
+                  variant="outline"
+                  disabled={isCloudIndex}
+                  onClick={() => setOfflineOpen(true)}
+                >
+                  {isOfflineDownloadActive(offlineJob?.status) ? (
+                    <Spinner data-icon="inline-start" />
+                  ) : (
+                    <CloudDownloadIcon data-icon="inline-start" />
+                  )}
+                  离线下载
+                </Button>
+                <Button
+                  type="button"
+                  disabled={uploading || isCloudIndex}
                   onClick={() => fileInputRef.current?.click()}
                 >
                   {uploading ? <Spinner data-icon="inline-start" /> : <UploadCloudIcon data-icon="inline-start" />}
@@ -670,6 +1328,8 @@ export function ModalDrive() {
                     setRenameTarget(target)
                     setRenameName(target.name)
                   }}
+                  onCopy={(target) => openTransfer(target, "copy")}
+                  onMove={(target) => openTransfer(target, "move")}
                   onDelete={setDeleteTarget}
                 />
               )) : null}
@@ -678,12 +1338,22 @@ export function ModalDrive() {
                 <Empty className="min-h-64">
                   <EmptyHeader>
                     <EmptyMedia variant="icon">{query ? <SearchIcon /> : <FolderOpenIcon />}</EmptyMedia>
-                    <EmptyTitle>{query ? "没有匹配的文件" : "这个文件夹是空的"}</EmptyTitle>
+                    <EmptyTitle>
+                      {query
+                        ? "没有匹配的文件"
+                        : isCloudIndex
+                          ? "没有可用的远程网盘"
+                          : "这个文件夹是空的"}
+                    </EmptyTitle>
                     <EmptyDescription>
-                      {query ? "尝试更换搜索关键词。" : "拖入文件，或点击上传按钮开始使用。"}
+                      {query
+                        ? "尝试更换搜索关键词。"
+                        : isCloudIndex
+                          ? "请检查传入的 rclone 配置文件中是否包含 remote。"
+                          : "拖入文件，或点击上传按钮开始使用。"}
                     </EmptyDescription>
                   </EmptyHeader>
-                  {!query ? (
+                  {!query && !isCloudIndex ? (
                     <EmptyContent>
                       <Button type="button" variant="outline" onClick={() => fileInputRef.current?.click()}>
                         <UploadCloudIcon data-icon="inline-start" />
@@ -731,6 +1401,102 @@ export function ModalDrive() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={offlineOpen} onOpenChange={setOfflineOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>离线下载</DialogTitle>
+            <DialogDescription>
+              文件将保存到 {path}。多个链接会严格按照输入顺序逐个下载。
+            </DialogDescription>
+          </DialogHeader>
+          <Field>
+            <FieldLabel htmlFor="offline-download-links">下载链接</FieldLabel>
+            <Textarea
+              id="offline-download-links"
+              className="min-h-40 resize-y font-mono text-xs"
+              value={offlineLinks}
+              onChange={(event) => setOfflineLinks(event.target.value)}
+              placeholder={"https://example.com/video.mp4\nhttps://example.com/archive.zip"}
+              disabled={
+                offlineSubmitting ||
+                isOfflineDownloadActive(offlineJob?.status)
+              }
+              autoFocus
+            />
+            <FieldDescription>
+              每行一个 HTTP 或 HTTPS 直链，每批最多 50 个；同名文件会自动添加序号。
+            </FieldDescription>
+          </Field>
+
+          {offlineJob && isOfflineDownloadActive(offlineJob.status) ? (
+            <OfflineDownloadProgress
+              job={offlineJob}
+              stopping={offlineStopping}
+              onStop={() => void stopOfflineDownload()}
+            />
+          ) : null}
+
+          {offlineJob && !isOfflineDownloadActive(offlineJob.status) && offlineJob.results ? (
+            <div className="max-h-52 space-y-2 overflow-y-auto rounded-lg border p-3">
+              {offlineJob.results.map((result, index) => (
+                <div
+                  key={`${result.url}-${index}`}
+                  className="flex items-start justify-between gap-3 text-xs"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate font-medium">
+                      {result.entry?.name || result.url}
+                    </p>
+                    {result.error ? (
+                      <p className="mt-0.5 break-words text-destructive">
+                        {result.error}
+                      </p>
+                    ) : null}
+                  </div>
+                  <Badge
+                    variant={
+                      result.status === "completed"
+                        ? "secondary"
+                        : result.status === "canceled"
+                          ? "outline"
+                          : "destructive"
+                    }
+                  >
+                    {result.status === "completed"
+                      ? "完成"
+                      : result.status === "canceled"
+                        ? "已停止"
+                        : "失败"}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOfflineOpen(false)}>
+              关闭
+            </Button>
+            <Button
+              type="button"
+              disabled={
+                offlineSubmitting ||
+                !offlineLinks.trim() ||
+                isOfflineDownloadActive(offlineJob?.status)
+              }
+              onClick={() => void startOfflineDownload()}
+            >
+              {offlineSubmitting ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <CloudDownloadIcon data-icon="inline-start" />
+              )}
+              提交任务
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}>
         <DialogContent>
           <DialogHeader>
@@ -756,6 +1522,69 @@ export function ModalDrive() {
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={Boolean(transferTarget)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setTransferTarget(null)
+            setTransferDestination("")
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {transferOperation === "copy" ? "复制" : "移动"}“{transferTarget?.name}”
+            </DialogTitle>
+            <DialogDescription>
+              输入包含名称的完整目标路径。Cloud 路径格式为 /Cloud/远程名称/文件路径。
+            </DialogDescription>
+          </DialogHeader>
+          <FieldGroup>
+            <Field>
+              <FieldLabel>源路径</FieldLabel>
+              <Input value={transferTarget?.path || ""} readOnly />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="transfer-destination">目标路径</FieldLabel>
+              <Input
+                id="transfer-destination"
+                value={transferDestination}
+                onChange={(event) => setTransferDestination(event.target.value)}
+                placeholder={`/Cloud/远程名称/${transferTarget?.name || "文件名"}`}
+                autoFocus
+              />
+              <FieldDescription>
+                例如 /Cloud/onedrive/Backup/{transferTarget?.name || "文件名"}；目标已存在时不会覆盖。
+              </FieldDescription>
+            </Field>
+          </FieldGroup>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setTransferTarget(null)}>
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={
+                mutating ||
+                !transferDestination.trim() ||
+                transferDestination.trim() === transferTarget?.path
+              }
+              onClick={() => void transferEntry()}
+            >
+              {mutating ? (
+                <Spinner data-icon="inline-start" />
+              ) : transferOperation === "copy" ? (
+                <CopyIcon data-icon="inline-start" />
+              ) : (
+                <MoveRightIcon data-icon="inline-start" />
+              )}
+              {transferOperation === "copy" ? "开始复制" : "开始移动"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <DialogContent>
           <DialogHeader>
@@ -763,7 +1592,9 @@ export function ModalDrive() {
             <DialogDescription>
               {deleteTarget?.type === "directory"
                 ? "文件夹及其全部内容会被永久删除。"
-                : "文件会从 Modal Volume 中永久删除。"}
+                : deleteTarget?.path.startsWith("/Cloud/")
+                  ? "文件会从 rclone 远端网盘中永久删除。"
+                  : "文件会从 Modal Volume 中永久删除。"}
             </DialogDescription>
           </DialogHeader>
           <Alert variant="destructive">

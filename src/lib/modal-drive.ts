@@ -1,6 +1,17 @@
 import "server-only"
 
-const ALLOWED_ENDPOINTS = new Set(["health", "files", "folders", "upload", "download"])
+const ALLOWED_ENDPOINTS = new Set([
+  "health",
+  "files",
+  "folders",
+  "upload",
+  "download",
+  "metadata",
+  "offline-download",
+  "copy",
+  "move",
+  "transfer",
+])
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000
 
 export class ModalDriveError extends Error {
@@ -108,6 +119,49 @@ export async function proxyModalDriveRequest(request: Request, endpoint: string)
     status: upstream.status,
     headers: responseHeaders(upstream),
   })
+}
+
+export async function fetchModalDriveMetadata(path: string) {
+  const target = modalDriveUrl(
+    "metadata",
+    `?path=${encodeURIComponent(path)}`,
+  )
+  const request = new Request("http://toolbox.local", {
+    headers: { Accept: "application/json" },
+  })
+  const response = await fetch(target, {
+    method: "GET",
+    headers: modalHeaders(request),
+    cache: "no-store",
+    redirect: "error",
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+  if (!response.ok) {
+    throw new ModalDriveError(
+      `无法读取媒体元信息（HTTP ${response.status}）。`,
+      response.status,
+    )
+  }
+  return response.json() as Promise<{
+    entry: {
+      name: string
+      path: string
+      type: "file"
+      size: number
+      mimeType?: string | null
+      modifiedAt: string
+    }
+    video?: {
+      durationSeconds?: number | null
+      width?: number | null
+      height?: number | null
+      videoCodec?: string | null
+      audioCodec?: string | null
+      frameRate?: number | null
+      bitRate?: number | null
+      containerFormat?: string | null
+    } | null
+  }>
 }
 
 export function modalDriveErrorResponse(error: unknown) {

@@ -1,36 +1,45 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# TOOLBOX
 
-## Getting Started
+基于 Next.js 的个人工具集合。模型测试业务和数据库在本机运行；Modal 只提供
+Volume 网盘文件 API。
 
-First, run the development server:
+## 本地启动
+
+需要 Node.js 22.5 或更高版本（项目使用 Node 内置 SQLite）。
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+打开 [http://localhost:3000](http://localhost:3000)。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 本机数据库
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+默认保存在项目根目录的 `data/`，该目录不会提交到 Git：
 
-## Learn More
+- `model_tester.sqlite3`：模型渠道、渠道模型和请求日志。
+- `modal_drive.sqlite3`：Modal 网盘文件索引、操作事件和视频元信息。
+- `.model-tester.key`：自动生成的渠道 API Key 加密密钥。
 
-To learn more about Next.js, take a look at the following resources:
+可以在 `.env.local` 中设置 `TOOLBOX_DATA_DIR` 修改数据库目录，或者设置
+`MODEL_TESTER_DATABASE_KEY` 使用固定的渠道密钥加密口令。修改加密口令后，既有
+渠道密钥将无法解密。
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Modal 网盘
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+首次部署仍然使用 Python：
 
-## Deploy on Vercel
+```bash
+modal deploy modal/modal_drive.py
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Modal Volume 保存本地文件；可在部署时传入 `rclone.conf`，配置中的全部 remote
+会自动显示为 `/Cloud/<remote名称>`。Modal Python API 负责列目录、上传、下载、复制、移动、离线
+下载、重命名、删除，以及通过 ffprobe 返回视频元信息；源或目标位于 `/Cloud` 时
+文件操作使用 rclone。Next.js 将索引和元信息写入本机 `modal_drive.sqlite3`。
+离线下载任务在 Modal 后台执行，同一批以及同时提交的多个批次都会串行处理。
+Next.js 会轮询 Modal 的任务 API，在本机页面显示当前文件、字节进度、百分比和
+速度，并可停止离线下载、复制或移动任务；已完成的文件会保留。
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+完整配置见 [`modal/README.md`](modal/README.md) 和 [`.env.example`](.env.example)。
